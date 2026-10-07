@@ -38,7 +38,7 @@ Supporting classes: `SSBlock`, `CGLU`, `DynamicSparseGate`, `LayerNorm2d`.
 ## Installation
 
 ```bash
-git clone https://github.com/whynotnanfeng/LHRF.git
+git clone https://github.com/whynotnanfeng/LHRF-YOLO.git
 cd LHRF
 
 # Install dependencies
