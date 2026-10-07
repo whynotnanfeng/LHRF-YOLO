@@ -32,6 +32,9 @@ jobs:
       - name: Check the custom modules import
         run: python -c "from ultralytics.nn.modules import DEPMD, RMELAN, SWF; print('modules OK')"
 
+      - name: Check the two README files agree
+        run: python scripts/check_readme_sync.py
+
       - name: Build the model and verify complexity against the paper
         run: python scripts/smoke_test.py --paper
 
@@ -56,4 +59,4 @@ jobs:
         run: ruff check --select=E9,F scripts ultralytics/nn/modules/__init__.py
 
       - name: Check formatting
-        run: ruff format --check scripts/smoke_test.py
+        run: ruff format --check scripts/smoke_test.py scripts/check_readme_sync.py
