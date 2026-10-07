@@ -21,7 +21,6 @@ ultralytics-thop>=2.0.0
 # Custom modules dependencies (DEPMD, SWF, RMELAN)
 timm>=0.9.0
 einops>=0.6.0
-fvcore>=0.1.5
 
 # Optional: for model export
 # onnx>=1.12.0

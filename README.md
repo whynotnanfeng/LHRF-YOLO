@@ -1,113 +1,134 @@
 # LHRF-YOLO
-## 📄 Paper
 
-This repository is the official implementation of the following paper. The model
-architecture in [`LHRF.yaml`](LHRF.yaml) and the custom modules in
-[`ultralytics/nn/modules/block.py`](ultralytics/nn/modules/block.py) correspond
-directly to the method described in the paper.
+A lightweight YOLO variant for forest fire and smoke detection, built on the
+[Ultralytics](https://github.com/ultralytics/ultralytics) framework.
 
-**LHRF-YOLO: A Lightweight Model with Hybrid Receptive Field for Forest Fire Detection**
+## Paper
 
+This repository accompanies the following publication:
+
+> **LHRF-YOLO: A Lightweight Model with Hybrid Receptive Field for Forest Fire Detection**
+>
 > Yifan Ma, Weifeng Shan, Yanwei Sui, Mengyu Wang, Maofa Wang
-> *Forests*, 2025, **16**(7), 1095.
-> [[Article page]](https://www.mdpi.com/1999-4907/16/7/1095) · [[PDF]](https://www.mdpi.com/1999-4907/16/7/1095/pdf) · [[DOI]](https://doi.org/10.3390/f16071095)
+> *Forests* **2025**, *16*(7), 1095.
+>
+> Article: https://www.mdpi.com/1999-4907/16/7/1095
+> DOI: https://doi.org/10.3390/f16071095
 
-### Method ↔ Code Map
+### Modules
 
-The three contributions of LHRF-YOLO map onto the code as follows.
+The three contributions of the paper are implemented in
+[`ultralytics/nn/modules/block.py`](ultralytics/nn/modules/block.py) and wired
+together in [`LHRF.yaml`](LHRF.yaml).
 
-| Paper module | Full name | Code location | Role |
-|---|---|---|---|
-| **RMELAN** | Residual Multi-Branch Efficient Layer Aggregation Network | `block.py: class RMELAN` | Hybrid receptive field extraction — combines 2D selective scan (SS2D) with a residual multi-branch structure to model local detail and global context at linear complexity |
-| **DEPMD** | Dynamic Enhanced Patch Merge Downsampling | `block.py: class DEPMD` | Feature reorganization + channel-wise dynamic weighting, preserving fine smoke texture while reducing spatial resolution |
-| **SWF** | Scale Weighted Fusion | `block.py: class SWF` | Adaptive scale weight allocation for multi-scale feature fusion, avoiding information dilution |
-| **Mish** | Mish activation | replaces SiLU in the backbone | Improves capture of flame edges and faint, semi-transparent smoke textures |
+| Module | Class | Purpose |
+| --- | --- | --- |
+| RMELAN | `block.py: RMELAN` | Multi-branch aggregation combining convolutional branches with 2D selective scan for a large receptive field at linear complexity |
+| DEPMD | `block.py: DEPMD` | Patch-merge downsampling that reorganizes four interleaved sub-samples and re-weights channels, preserving fine smoke texture |
+| SWF | `block.py: SWF` | Scale weighted fusion that learns per-branch weights for multi-scale feature fusion |
 
-Supporting implementations:
+Supporting classes: `SSBlock`, `CGLU`, `DynamicSparseGate`, `LayerNorm2d`.
 
-- `SSBlock` / `CGLU` — the selective-scan block used inside RMELAN
-- `DynamicSparseGate` — the dynamic gating mechanism that allocates channels in RMELAN
-- `selective_scan/` — the CUDA selective-scan kernels
-
-### Reported Results
-
-On the self-constructed **Fire-SmokeDataset**, compared with the YOLOv11n baseline:
-
-| Metric | Value | Change |
-|---|---|---|
-| Parameters | 2.25 M | −12.8% |
-| GFLOPs | 5.4 | −14.3% |
-| mAP50 | 87.6% | improved |
-
-The model also shows leading generalization on the cross-scenario **M4SFWD**
-dataset, and has been deployed on NVIDIA Jetson edge platforms.
-
-### Citation
-
-If you use this work in your research, please cite the original paper:
-
-```bibtex
-@article{ma2025lhrf,
-  title   = {LHRF-YOLO: A Lightweight Model with Hybrid Receptive Field for Forest Fire Detection},
-  author  = {Ma, Yifan and Shan, Weifeng and Sui, Yanwei and Wang, Mengyu and Wang, Maofa},
-  journal = {Forests},
-  volume  = {16},
-  number  = {7},
-  pages   = {1095},
-  year    = {2025},
-  doi     = {10.3390/f16071095}
-}
-```
-
-> The dataset is distributed under CC BY 4.0; please cite the original authors
-> when reusing Fire-SmokeDataset.
-
-## 📁 Dataset Download
-
-The dataset used in this project is available via the following cloud storage links:
-
-- 🔗 **Baidu Netdisk**: [Download here](https://pan.baidu.com/s/1_Xti5AoIER3yZ5hQhToSZQ) (Extraction code: `m58i`)  
-- 🌍 **Google Drive**: [Download here](https://drive.google.com/file/d/1VFYYXHbzDTtgjTUU8cl6qNgi8ZahxGSe/view?usp=sharing)  
-- 📦 **Alternative Link**: [QuarkDrive](https://pan.quark.cn/s/c13d3a6251c0) (Extraction code: `4aii`)  
-
-> ⚠️ Note: Please choose the appropriate download option based on your region. Some links may have slower access speeds depending on your network location.
-
-## 🚀 Deployment Guide
-
-### Requirements
+## Requirements
 
 - Python >= 3.8
-- CUDA GPU (recommended for accelerated training and inference)
-- pip
+- PyTorch >= 1.8.0
+- A CUDA-capable GPU is recommended for training and inference.
 
-### Installation
+## Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/whynotnanfeng/LHRF.git
 cd LHRF
 
-# Install dependencies (choose one)
-pip install -r requirements.txt       # Standard installation
-# OR
-pip install -e .                      # Editable mode for development
+# Install dependencies
+pip install -r requirements.txt
+
+# Or install in editable mode
+pip install -e .
 ```
 
-### Quick Start
+The selective scan operators use Triton and the CUDA kernels in
+[`selective_scan/`](selective_scan). When Triton is unavailable the code falls
+back to an equivalent PyTorch implementation, which is slower but functionally
+equivalent.
 
-**Train Model**
+## Dataset
+
+The dataset used in the paper is available from the following mirrors:
+
+- **Baidu Netdisk**: [link](https://pan.baidu.com/s/1_Xti5AoIER3yZ5hQhToSZQ) (code `m58i`)
+- **Google Drive**: [link](https://drive.google.com/file/d/1VFYYXHbzDTtgjTUU8cl6qNgi8ZahxGSe/view?usp=sharing)
+- **QuarkDrive**: [link](https://pan.quark.cn/s/c13d3a6251c0) (code `4aii`)
+
+Organize the data as expected by `data_fire-smoke.yaml`:
+
+```text
+FSDataset/
+├── train/
+│   ├── images/
+│   └── labels/
+├── valid/
+│   ├── images/
+│   └── labels/
+└── test/
+    ├── images/
+    └── labels/
+```
+
+Two classes are used: `fire` and `smoke`. Adjust the `path` field in
+`data_fire-smoke.yaml` to point at your local dataset directory.
+
+## Usage
+
+### Training
+
 ```bash
+# Train with the default configuration
 yolo train model=LHRF.yaml data=data_fire-smoke.yaml epochs=100 imgsz=640
+
+# Resume from the last checkpoint
+yolo train model=runs/detect/train/weights/last.pt resume=True
 ```
 
-**Inference**
+Key training arguments:
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `epochs` | `100` | Number of training epochs |
+| `imgsz` | `640` | Training image size |
+| `batch` | auto | Batch size; auto-scales to available GPU memory |
+| `device` | auto | Training device, e.g. `0` for GPU 0 or `cpu` |
+| `workers` | `8` | Dataloader worker processes |
+| `patience` | `100` | Early stopping patience in epochs |
+| `seed` | `0` | Random seed for reproducibility |
+| `project` | `runs/detect` | Output directory root |
+| `name` | `train` | Experiment name |
+
+### Inference
+
 ```bash
+# Predict on an image
 yolo predict model=runs/detect/train/weights/best.pt source=path/to/image.jpg
+
+# Predict on a video
+yolo predict model=runs/detect/train/weights/best.pt source=path/to/video.mp4
 ```
 
-**Export Model**
+### Validation
+
 ```bash
+yolo val model=runs/detect/train/weights/best.pt data=data_fire-smoke.yaml
+```
+
+### Export
+
+```bash
+# Export to ONNX
 yolo export model=runs/detect/train/weights/best.pt format=onnx
+
+# Export to TensorRT
+yolo export model=runs/detect/train/weights/best.pt format=engine
 ```
 
 ### Python API
@@ -115,12 +136,20 @@ yolo export model=runs/detect/train/weights/best.pt format=onnx
 ```python
 from ultralytics import YOLO
 
-# Load model
 model = YOLO("LHRF.yaml")
 
 # Train
 model.train(data="data_fire-smoke.yaml", epochs=100, imgsz=640)
 
-# Inference
+# Predict
 results = model.predict(source="path/to/image.jpg")
 ```
+
+## License
+
+This project builds on Ultralytics YOLO, which is licensed under AGPL-3.0. See
+[`LICENSE`](LICENSE) for the full terms.
+
+The Fire-SmokeDataset is distributed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); please cite the
+original authors when reusing it.

@@ -56,9 +56,9 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
+    DEPMD,
     RMELAN,
     SWF,
-    DEPMD
 )
 from .conv import (
     CBAM,
@@ -158,5 +158,7 @@ __all__ = (
     "C2fCIB",
     "Attention",
     "PSA",
+    "DEPMD",
     "RMELAN",
-    "SWF",)
+    "SWF",
+)

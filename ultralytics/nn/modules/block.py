@@ -1,45 +1,49 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
-from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
-from .transformer import TransformerBlock
+import math
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, trunc_normal_
-from fvcore.nn import FlopCountAnalysis, flop_count_str, flop_count, parameter_count
-# import warnings
-DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
-# train speed is slower after enabling this opts.
-# torch.backends.cudnn.enabled = True
-# torch.backends.cudnn.benchmark = True
-# torch.backends.cudnn.deterministic = True
-
-
 from einops import rearrange
-try:
-    from .csm_triton import cross_scan_fn, cross_merge_fn
-except:
-    from csm_triton import cross_scan_fn, cross_merge_fn
+from timm.models.layers import DropPath, trunc_normal_
+
+from ultralytics.utils.torch_utils import fuse_conv_and_bn
+
+from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
+from .transformer import TransformerBlock
+
+DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 try:
-    from .csms6s import selective_scan_fn, selective_scan_flop_jit
-except:
-    from csms6s import selective_scan_fn, selective_scan_flop_jit
+    from .csm_triton import cross_merge_fn, cross_scan_fn
+except ImportError as e:
+    raise ImportError(
+        "csm_triton is required by the SS2D selective scan operators. "
+        "Install the CUDA extensions in the selective_scan/ directory."
+    ) from e
 
+try:
+    from .csms6s import selective_scan_flop_jit, selective_scan_fn
+except ImportError as e:
+    raise ImportError(
+        "csms6s is required by the selective scan operators. "
+        "Install the CUDA extensions in the selective_scan/ directory."
+    ) from e
 
-# FLOPs counter not prepared fro mamba2
 try:
     from .mamba2.ssd_minimal import selective_scan_chunk_fn
-except:
-    from mamba2.ssd_minimal import selective_scan_chunk_fn
+except ImportError as e:
+    raise ImportError(
+        "mamba2.ssd_minimal is required by the selective scan operators. "
+        "Ensure the mamba2 module is present next to block.py."
+    ) from e
 
-from ultralytics.nn.modules.conv import autopad, Conv, DWConv, CBAM, GhostConv
-from timm.models.layers import to_2tuple
-import math
-from functools import partial
+from ultralytics.nn.modules.conv import CBAM, DWConv, Conv, GhostConv, autopad
+
 __all__ = (
     "DFL",
     "HGBlock",
@@ -79,10 +83,10 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
-    'RMELAN',
-    'SSBlock',
-    'SWF',
-    'DEPMD'
+    "DEPMD",
+    "RMELAN",
+    "SSBlock",
+    "SWF",
 )
 
 
@@ -1161,7 +1165,25 @@ class se(nn.Module):
 
 
 class DynamicSparseGate(nn.Module):
+    """Channel-wise gating unit with annealed Gumbel-softmax hard selection.
+
+    Learns a per-channel gate from global context and applies it multiplicatively to the input. During
+    training the gate is sampled with Gumbel-softmax noise and binarised, so only channels whose gate
+    exceeds 0.5 contribute to the output. The temperature ``tau`` decays once per epoch (see
+    ``_auto_anneal``) so that the hard selection gradually sharpens. At evaluation time the gate is
+    fully deterministic and binary.
+    """
+
     def __init__(self, channels, reduction=16, init_tau=5.0, tau_decay=0.97, batches_per_epoch=189):
+        """Initialize the gate.
+
+        Args:
+            channels: Number of channels the gate operates on.
+            reduction: Bottleneck ratio of the gating convolution.
+            init_tau: Initial Gumbel-softmax temperature.
+            tau_decay: Multiplicative decay applied to ``tau`` at each epoch boundary.
+            batches_per_epoch: Number of training batches per epoch, used to time the decay.
+        """
         super().__init__()
         self.channels = channels
         self.tau_decay = tau_decay
@@ -1182,6 +1204,7 @@ class DynamicSparseGate(nn.Module):
         nn.init.constant_(self.gate_conv[-1].bias, 0.0)
 
     def _auto_anneal(self):
+        """Decay the Gumbel-softmax temperature once per epoch."""
         if self.training:
             self.batch_counter += 1
 
@@ -1193,6 +1216,7 @@ class DynamicSparseGate(nn.Module):
                     self.batch_counter.zero_()
 
     def forward(self, x):
+        """Apply the channel gate to ``x`` of shape (B, C, H, W)."""
         self._auto_anneal()
 
         B, C = x.shape[:2]
@@ -1211,57 +1235,147 @@ class DynamicSparseGate(nn.Module):
             gate = gate + (hard_gate - gate.detach())
         else:
             gate = (gate >= 0.5).float()
-        # if self.batch_counter == self.batches_per_epoch-1:
-        #     active_ratio = (gate > 0.5).float().mean().item()
-        #     print(f"Epoch, Tau {self.tau:.3f}, Active Ratio: {active_ratio:.2%}")
         return x * gate.view(B, C, 1, 1)
 
+
 class SWF(nn.Module):
-    def __init__(self, dimension=1,):
-        super(SWF, self).__init__()
+    """Scale weighted fusion.
+
+    Concatenates two feature maps and learns a normalised pair of weights ``w`` scaled by a
+    global factor ``v``, so that each branch contributes in proportion to its usefulness instead of
+    being merged at a fixed 1:1 ratio. Input is a list of two tensors; they are weighted and joined
+    along dimension ``dimension``.
+    """
+
+    def __init__(self, dimension=1):
+        """Initialize the fusion weights.
+
+        Args:
+            dimension: Axis along which the weighted feature maps are concatenated.
+        """
+        super().__init__()
         self.d = dimension
         self.w = nn.Parameter(torch.ones(2, dtype=torch.float32), requires_grad=True)
         self.v = nn.Parameter(torch.ones(1, dtype=torch.float32), requires_grad=True)
         self.epsilon = 0.0001
 
     def forward(self, x):
+        """Fuse a list of two feature maps with learned scale weights."""
         w = self.w
         v = self.v
         weight = v[0] * w / (torch.sum(w, dim=0) + self.epsilon)
         x = [weight[0] * x[0], weight[1] * x[1]]
         t = torch.cat(x, self.d)
         return t
+
+
 class CGLU(nn.Module):
+    """Convolutional gated linear unit used as the feed-forward block in ``SSBlock``.
+
+    Splits an expanded 1x1 convolution into a feature half and a gate half, applies depthwise
+    convolution plus a residual connection to the feature half, normalises it with the activation
+    and multiplies by the gate before projecting back down.
+    """
+
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU):
+        """Initialize the gated linear unit.
+
+        Args:
+            in_features: Input channels.
+            hidden_features: Hidden channels; defaults to ``in_features``.
+            out_features: Output channels; defaults to ``in_features``.
+            act_layer: Activation applied after the depthwise convolution.
+        """
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         hidden_features = int(2 * hidden_features / 3)
         self.fc1 = nn.Conv2d(in_features, hidden_features * 2, kernel_size=1)
-        self.dwconv = nn.Conv2d(hidden_features, hidden_features, kernel_size=3, stride=1, padding=1, bias=True,
-                                groups=hidden_features)
+        self.dwconv = nn.Conv2d(
+            hidden_features, hidden_features, kernel_size=3, stride=1, padding=1, bias=True, groups=hidden_features
+        )
         self.act = act_layer()
         self.fc2 = nn.Conv2d(hidden_features, out_features, kernel_size=1)
+
     def forward(self, x):
+        """Gate and project the input feature map."""
         x, v = self.fc1(x).chunk(2, dim=1)
         x = self.act(self.dwconv(x) + x) * v
         x = self.fc2(x)
         return x
 
+
 class LayerNorm2d(nn.Module):
+    """Layer normalization over the channel dimension of a 4D NCHW tensor."""
 
     def __init__(self, normalized_shape, eps=1e-6, elementwise_affine=True):
+        """Initialize the layer normalization.
+
+        Args:
+            normalized_shape: Channel count to normalize over.
+            eps: Small constant added to the variance for numerical stability.
+            elementwise_affine: Whether to learn per-channel scale and bias.
+        """
         super().__init__()
         self.norm = nn.LayerNorm(normalized_shape, eps, elementwise_affine)
 
     def forward(self, x):
+        """Normalize over the channel dimension of an NCHW tensor."""
         x = rearrange(x, 'b c h w -> b h w c').contiguous()
         x = self.norm(x)
         x = rearrange(x, 'b h w c -> b c h w').contiguous()
         return x
+
+
 class SSBlock(nn.Module):
-    def __init__(self, in_channels, hidden_dim: int = 0, ssm_d_state=16, ffn_ratio=2, ssm_ratio=2.0, ssm_dt_rank="auto", ssm_act_layer=nn.Mish, ssm_conv=3, ssm_conv_bias=True,
-                 ssm_drop_rate=0., ssm_init="v0", forward_type="v2", channel_first=False, dyt=False, glu=True):
+    """Selective scan block combining a 2D selective scan (SS2D) with a gated convolutional FFN.
+
+    The input is normalized channel-last, passed through the ``SS2D`` operator and combined with a
+    residual connection. A second normalization feeds either ``CGLU`` (default) or a plain
+    convolutional feed-forward network. The operator runs in linear time in the number of tokens,
+    which keeps the receptive field large without the quadratic cost of self-attention.
+
+    Reference: Liu et al., "Visual State Space Model", NeurIPS 2022.
+    https://arxiv.org/abs/2206.11990
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        hidden_dim: int = 0,
+        ssm_d_state=16,
+        ffn_ratio=2,
+        ssm_ratio=2.0,
+        ssm_dt_rank="auto",
+        ssm_act_layer=nn.Mish,
+        ssm_conv=3,
+        ssm_conv_bias=True,
+        ssm_drop_rate=0.0,
+        ssm_init="v0",
+        forward_type="v2",
+        channel_first=False,
+        dyt=False,
+        glu=True,
+    ):
+        """Initialize the selective scan block.
+
+        Args:
+            in_channels: Channels of the input feature map.
+            hidden_dim: Model dimension used inside the selective scan; defaults to 0.
+            ssm_d_state: Number of state channels in the selective scan.
+            ffn_ratio: Expansion ratio of the feed-forward network.
+            ssm_ratio: Expansion ratio of the selective scan inner channels.
+            ssm_dt_rank: Rank of the ``dt`` projection; ``"auto"`` picks a value from ``hidden_dim``.
+            ssm_act_layer: Activation inside the selective scan.
+            ssm_conv: Kernel size of the selective scan's internal depthwise convolution.
+            ssm_conv_bias: Whether that convolution uses a bias term.
+            ssm_drop_rate: Dropout applied inside the selective scan.
+            ssm_init: Initialization scheme for the ``dt`` projection.
+            forward_type: Forward pass variant of the underlying ``SS2D``.
+            channel_first: Whether ``SS2D`` consumes NCHW instead of NHWC input.
+            dyt: Disables the layer norms when True.
+            glu: Use ``CGLU`` as the feed-forward network when True, otherwise a plain conv FFN.
+        """
         super().__init__()
         self.op = SS2D(
             d_model=hidden_dim,
@@ -1269,38 +1383,27 @@ class SSBlock(nn.Module):
             ssm_ratio=ssm_ratio,
             dt_rank=ssm_dt_rank,
             act_layer=ssm_act_layer,
-            # ==========================
             d_conv=ssm_conv,
             conv_bias=ssm_conv_bias,
-            # ==========================
             dropout=ssm_drop_rate,
-            # bias=False,
-            # ==========================
-            # dt_min=0.001,
-            # dt_max=0.1,
-            # dt_init="random",
-            # dt_scale="random",
-            # dt_init_floor=1e-4,
             initialize=ssm_init,
-            # ==========================
             forward_type=forward_type,
             channel_first=channel_first,
         )
         if glu:
-            self.ffn = CGLU(
-                in_features=in_channels, hidden_features=int(in_channels * ffn_ratio))
+            self.ffn = CGLU(in_features=in_channels, hidden_features=int(in_channels * ffn_ratio))
         else:
-            self.ffn = nn.Sequential(nn.Conv2d(in_channels, int(in_channels * ffn_ratio)),
-                                     nn.GELU(),
-                                     nn.Conv2d(int(in_channels * ffn_ratio), in_channels))
-        if dyt:
-            pass
-        else:
+            self.ffn = nn.Sequential(
+                nn.Conv2d(in_channels, int(in_channels * ffn_ratio)),
+                nn.GELU(),
+                nn.Conv2d(int(in_channels * ffn_ratio), in_channels),
+            )
+        if not dyt:
             self.norm1 = nn.LayerNorm(hidden_dim)
             self.norm2 = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
-
+        """Run the selective scan branch followed by the feed-forward branch, both residual."""
         x1 = rearrange(x, 'b c h w -> b h w c').contiguous()
         x2 = self.op(self.norm1(x1))
         x1 = rearrange(x2, 'b h w c -> b c h w').contiguous()
@@ -1313,7 +1416,31 @@ class SSBlock(nn.Module):
         return x
 
 class RMELAN(nn.Module):
+    """Residual multi-branch efficient layer aggregation network.
+
+    Splits the input into a quarter-width embedding and processes it through parallel branches: a
+    convolutional branch for local detail and one or more ``SSBlock`` selective scan branches for
+    global context. With ``e=2`` two extra branches are added that re-process the convolution output
+    through a single ``SSBlock`` and a ``Bottleneck``, giving five branches in total. The branches
+    are concatenated, sparsified by a ``DynamicSparseGate`` and fused back to ``out_channels``; a
+    residual connection is applied when the channel count is unchanged.
+
+    The selective scan gives a large receptive field at linear complexity, so the module captures
+    both the dynamic spread of flames and faint smoke texture without the cost of self-attention.
+    """
+
     def __init__(self, in_channels, out_channels, n=1, e=2, ssm_state=12, ssm_ratio=2, ffn_ratio=4):
+        """Initialize the aggregation network.
+
+        Args:
+            in_channels: Input channels.
+            out_channels: Output channels.
+            n: Number of ``Bottleneck`` and ``SSBlock`` stages in the main branches.
+            e: Branch expansion factor; ``e=2`` enables the two extra re-processing branches.
+            ssm_state: State channel count for the selective scan; forced to 1 when ``e=2``.
+            ssm_ratio: Inner channel expansion of the selective scan; forced to 2 when ``e=2``.
+            ffn_ratio: Expansion ratio of the feed-forward network inside ``SSBlock``.
+        """
         super().__init__()
         self.e = e
         self.inc = in_channels
@@ -1325,20 +1452,39 @@ class RMELAN(nn.Module):
         if self.e == 2:
             ssm_state = 1
             ssm_ratio = 2
-            self.ss1 = nn.Sequential(*(
-                SSBlock(in_channels=self.ss_channels, hidden_dim=self.ss_channels, ssm_d_state=ssm_state,
-                        ffn_ratio=ffn_ratio, ssm_ratio=ssm_ratio) for _ in range(1)))
+            self.ss1 = nn.Sequential(
+                *(
+                    SSBlock(
+                        in_channels=self.ss_channels,
+                        hidden_dim=self.ss_channels,
+                        ssm_d_state=ssm_state,
+                        ffn_ratio=ffn_ratio,
+                        ssm_ratio=ssm_ratio,
+                    )
+                    for _ in range(1)
+                )
+            )
             self.lconv1 = nn.Sequential(*(Bottleneck(self.ss_channels, self.ss_channels) for _ in range(1)))
             self.num = 3 + 2 * n
         self.conv1 = Conv(in_channels, self.split_channels)
         self.lconv = nn.Sequential(*(Bottleneck(self.ss_channels, self.ss_channels) for _ in range(n)))
-        self.ss = nn.Sequential(*(
-        SSBlock(in_channels=self.ss_channels, hidden_dim=self.ss_channels, ssm_d_state=ssm_state, ffn_ratio=ffn_ratio,
-                ssm_ratio=ssm_ratio) for _ in range(n)))
+        self.ss = nn.Sequential(
+            *(
+                SSBlock(
+                    in_channels=self.ss_channels,
+                    hidden_dim=self.ss_channels,
+                    ssm_d_state=ssm_state,
+                    ffn_ratio=ffn_ratio,
+                    ssm_ratio=ssm_ratio,
+                )
+                for _ in range(n)
+            )
+        )
         self.trans = Conv(self.num * self.split_channels, self.outc)
         self.mix = DynamicSparseGate(self.num * self.split_channels)
 
     def forward(self, x):
+        """Aggregate local and global branches and return a tensor of shape (B, out_channels, H, W)."""
         x1 = self.conv1(x)
         x2 = self.ss(x1)
         x3 = self.lconv(x1)
@@ -1353,25 +1499,44 @@ class RMELAN(nn.Module):
 
 
 class DEPMD(nn.Module):
+    """Dynamic enhanced patch merge downsampling.
+
+    Halves the spatial resolution of an NCHW tensor without discarding information: the input is
+    split into four interleaved sub-samples (even/even, odd/even, even/odd, odd/odd rows and
+    columns), concatenated along the channel axis to give ``4 * dim`` channels, and projected back
+    to ``out_dim`` by a pointwise convolution with batch normalization and a Mish activation. A
+    squeeze-and-excitation branch re-weights the output channel-wise and is added back through a
+    learnable ``alpha``, so fine smoke texture survives the reduction better than with strided
+    convolution or plain patch merging.
+    """
+
     def __init__(self, dim, out_dim):
+        """Initialize the downsampling module.
+
+        Args:
+            dim: Input channels; the module internally expands them to ``4 * dim`` before merging.
+            out_dim: Output channels after the pointwise projection.
+        """
         super().__init__()
         self.hidden = int(dim * 4)
 
         self.pw_linear = nn.Sequential(
-            nn.Conv2d(self.hidden, out_dim, kernel_size=1, stride=1, padding=0),
-            nn.BatchNorm2d(out_dim),
-            nn.Mish()
+            nn.Conv2d(self.hidden, out_dim, kernel_size=1, stride=1, padding=0), nn.BatchNorm2d(out_dim), nn.Mish()
         )
         self.se = se(out_dim)
-        # self.se = CBAM(out_dim)
         self.alpha = nn.Parameter(torch.ones(1))
+
     def forward(self, x):
-        y = torch.cat([
-            x[..., ::2, ::2],
-            x[..., 1::2, ::2],
-            x[..., ::2, 1::2],
-            x[..., 1::2, 1::2]
-        ], dim=1)
+        """Downsample ``x`` by 2 and return a tensor of shape (B, out_dim, H/2, W/2)."""
+        y = torch.cat(
+            [
+                x[..., ::2, ::2],
+                x[..., 1::2, ::2],
+                x[..., ::2, 1::2],
+                x[..., 1::2, 1::2],
+            ],
+            dim=1,
+        )
         y = self.pw_linear(y)
         return y + self.se(y) * self.alpha
 

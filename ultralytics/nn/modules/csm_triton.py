@@ -2,21 +2,42 @@ import torch
 import warnings
 
 WITH_TRITON = True
-# WITH_TRITON = False
 try:
     import triton
     import triton.language as tl
-except:
+except ImportError:
     WITH_TRITON = False
-    warnings.warn("Triton not installed, fall back to pytorch implements.")
+    warnings.warn("Triton not installed, fall back to pytorch implementations.")
+
+    class _TritonStub:
+        """Placeholder so the ``@triton.jit`` decorated kernels below stay importable without Triton.
+
+        The kernels are never called on this path: ``cross_scan_fn``/``cross_merge_fn`` dispatch to
+        the pure PyTorch implementations whenever ``WITH_TRITON`` is False. Type annotations such as
+        ``tl.tensor`` are evaluated at definition time, so ``tl`` resolves to a permissive dummy that
+        returns the attribute name for any access.
+        """
+
+        def __getattr__(self, name):
+            return name
+
+        @staticmethod
+        def jit(fn):
+            return fn
+
+    class _TritonLanguageStub:
+        """Permissive stand-in for ``triton.language`` used only in kernel type annotations."""
+
+        def __getattr__(self, name):
+            return name
+
+    triton = _TritonStub()
+    tl = _TritonLanguageStub()
+
 
 # to make sure cached_property can be loaded for triton
 if WITH_TRITON:
-    try:
-        from functools import cached_property
-    except:
-        warnings.warn("if you are using py37, add this line to functools.py: "
-            "cached_property = lambda func: property(lru_cache()(func))")
+    from functools import cached_property
 
 # torch implementation ========================================
 def cross_scan_fwd(x: torch.Tensor, in_channel_first=True, out_channel_first=True, scans=0):
