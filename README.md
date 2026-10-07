@@ -155,33 +155,80 @@ Label files are in YOLO format: one line per object,
 `class x_center y_center width height`, normalized to `[0, 1]`. Full field
 reference in [`docs/DATASET.md`](docs/DATASET.md).
 
+A smoke plume is often annotated as a box around the visible smoke rather than
+a tight mask, so boxes for the same fire event can overlap.
+
+Check the layout before a long run:
+
+```bash
+yolo checks data=data_fire-smoke.yaml
+```
+
+The dataset checks scan for missing or corrupt images, verify the label files
+parse, and report the class distribution.
+
 ---
 
 ## Usage
 
 ### Training
 
-```bash
-# Train with the published configuration
-yolo train model=LHRF.yaml data=data_fire-smoke.yaml epochs=100 imgsz=640
+The paper trains with the hyperparameter configuration in its Table 3, on a
+Tesla V100. The defaults shipped with Ultralytics differ, so pass the paper's
+values explicitly:
 
-# Resume the last run
-yolo train model=runs/detect/train/weights/last.pt resume=True
+```bash
+yolo train model=LHRF.yaml data=data_fire-smoke.yaml \
+    epochs=100 imgsz=640 batch=64 workers=32 \
+    optimizer=AdamW lr0=0.001 momentum=0.937 weight_decay=0.0005
 ```
 
-Key arguments:
+| Parameter | Paper (Table 3) | Ultralytics default | Note |
+|---|---|---|---|
+| Input size | 640 x 640 | 640 | same |
+| Epochs | 100 | 100 | same |
+| Batch size | 64 | 16 | paper value needs a large GPU; lower it if memory is tight |
+| Workers | 32 | 8 | |
+| Optimizer | **AdamW** | `auto` (SGD) | **must be set explicitly** |
+| Learning rate (`lr0`) | **0.001** | 0.01 | **must be set explicitly**; 0.01 is the SGD default |
+| Momentum (`momentum`) | 0.937 | 0.937 | same; this is Adam beta1 |
+| Weight decay | 0.0005 | 0.0005 | see the note below |
+
+> `momentum=0.937` is the Adam beta1, not SGD momentum. Leave it as shown.
+> The paper does not report a learning-rate schedule, so the default linear
+> schedule with a 3-epoch warmup is used here.
+
+**Known deviation.** Ultralytics builds AdamW with a hard-coded
+`weight_decay=0.0` (`ultralytics/engine/trainer.py`), so the paper's 0.0005
+does not take effect through the `weight_decay` argument. Passing it is
+harmless, but the run will use zero weight decay. Reproducing the published
+number exactly requires patching that optimizer call.
+
+Other useful arguments:
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `epochs` | `100` | Training epochs |
-| `imgsz` | `640` | Input resolution |
-| `batch` | auto | Batch size; auto-scales to available GPU memory |
 | `device` | auto | `0` for GPU 0, `cpu`, or `0,1` for multi-GPU |
-| `workers` | `8` | Dataloader workers |
 | `patience` | `100` | Early-stopping patience in epochs |
-| `optimizer` | auto | Optimizer; `auto` selects one for this model |
 | `seed` | `0` | Random seed |
 | `project` / `name` | `runs/detect` / `train` | Output directory and experiment name |
+| `resume` | `False` | Resume the last run from its checkpoint |
+
+```bash
+# Resume an interrupted run
+yolo train model=runs/detect/train/weights/last.pt resume=True
+
+# Evaluate on the test split instead of val
+yolo val model=runs/detect/train/weights/best.pt data=data_fire-smoke.yaml split=test
+```
+
+Checkpoints and logs are written to `runs/detect/train/`, with the resolved
+configuration saved alongside as `args.yaml`. Watch progress with:
+
+```bash
+pip install tensorboard          # optional, not in requirements.txt
+tensorboard --logdir runs/detect/train
+```
 
 ### Inference
 
@@ -194,7 +241,13 @@ yolo predict model=runs/detect/train/weights/best.pt source=path/to/video.mp4
 
 ```bash
 yolo val model=runs/detect/train/weights/best.pt data=data_fire-smoke.yaml
+
+# Report metrics on the test split
+yolo val model=runs/detect/train/weights/best.pt data=data_fire-smoke.yaml split=test
 ```
+
+`split` selects which partition of `data_fire-smoke.yaml` is evaluated
+(`val`, `test` or `train`); it defaults to `val`.
 
 ### Export
 
@@ -205,14 +258,39 @@ yolo export model=runs/detect/train/weights/best.pt format=engine
 
 ### Python API
 
+The command line and the Python API take the same arguments. Use this form when
+the run needs to be scripted, or to pass the paper's hyperparameters:
+
 ```python
 from ultralytics import YOLO
 
-model = YOLO("LHRF.yaml")
-model.train(data="data_fire-smoke.yaml", epochs=100, imgsz=640)
+model = YOLO("LHRF.yaml")            # build from the model YAML
+model.train(
+    data="data_fire-smoke.yaml",
+    epochs=100,
+    imgsz=640,
+    batch=64,
+    workers=32,
+    optimizer="AdamW",
+    lr0=0.001,
+    momentum=0.937,
+    weight_decay=0.0005,
+)
 
 results = model.predict(source="path/to/image.jpg")
+metrics = model.val(data="data_fire-smoke.yaml")
 ```
+
+To load a trained checkpoint instead of the YAML:
+
+```python
+model = YOLO("runs/detect/train/weights/best.pt")
+```
+
+> A CUDA GPU is required for training and for `YOLO(...)` to build the model,
+> because the selective scan in `SSBlock` calls the CUDA extensions. On a
+> CPU-only install, `scripts/smoke_test.py` still verifies the parameter
+> count.
 
 ### Verifying the setup
 
