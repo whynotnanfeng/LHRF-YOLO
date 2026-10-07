@@ -1,4 +1,67 @@
 # LHRF-YOLO
+## 📄 Paper
+
+This repository is the official implementation of the following paper. The model
+architecture in [`LHRF.yaml`](LHRF.yaml) and the custom modules in
+[`ultralytics/nn/modules/block.py`](ultralytics/nn/modules/block.py) correspond
+directly to the method described in the paper.
+
+**LHRF-YOLO: A Lightweight Model with Hybrid Receptive Field for Forest Fire Detection**
+
+> Yifan Ma, Weifeng Shan, Yanwei Sui, Mengyu Wang, Maofa Wang
+> *Forests*, 2025, **16**(7), 1095.
+> [[Article page]](https://www.mdpi.com/1999-4907/16/7/1095) · [[PDF]](https://www.mdpi.com/1999-4907/16/7/1095/pdf) · [[DOI]](https://doi.org/10.3390/f16071095)
+
+### Method ↔ Code Map
+
+The three contributions of LHRF-YOLO map onto the code as follows.
+
+| Paper module | Full name | Code location | Role |
+|---|---|---|---|
+| **RMELAN** | Residual Multi-Branch Efficient Layer Aggregation Network | `block.py: class RMELAN` | Hybrid receptive field extraction — combines 2D selective scan (SS2D) with a residual multi-branch structure to model local detail and global context at linear complexity |
+| **DEPMD** | Dynamic Enhanced Patch Merge Downsampling | `block.py: class DEPMD` | Feature reorganization + channel-wise dynamic weighting, preserving fine smoke texture while reducing spatial resolution |
+| **SWF** | Scale Weighted Fusion | `block.py: class SWF` | Adaptive scale weight allocation for multi-scale feature fusion, avoiding information dilution |
+| **Mish** | Mish activation | replaces SiLU in the backbone | Improves capture of flame edges and faint, semi-transparent smoke textures |
+
+Supporting implementations:
+
+- `SSBlock` / `CGLU` — the selective-scan block used inside RMELAN
+- `DynamicSparseGate` — the dynamic gating mechanism that allocates channels in RMELAN
+- `selective_scan/` — the CUDA selective-scan kernels
+
+### Reported Results
+
+On the self-constructed **Fire-SmokeDataset**, compared with the YOLOv11n baseline:
+
+| Metric | Value | Change |
+|---|---|---|
+| Parameters | 2.25 M | −12.8% |
+| GFLOPs | 5.4 | −14.3% |
+| mAP50 | 87.6% | improved |
+
+The model also shows leading generalization on the cross-scenario **M4SFWD**
+dataset, and has been deployed on NVIDIA Jetson edge platforms.
+
+### Citation
+
+If you use this work in your research, please cite the original paper:
+
+```bibtex
+@article{ma2025lhrf,
+  title   = {LHRF-YOLO: A Lightweight Model with Hybrid Receptive Field for Forest Fire Detection},
+  author  = {Ma, Yifan and Shan, Weifeng and Sui, Yanwei and Wang, Mengyu and Wang, Maofa},
+  journal = {Forests},
+  volume  = {16},
+  number  = {7},
+  pages   = {1095},
+  year    = {2025},
+  doi     = {10.3390/f16071095}
+}
+```
+
+> The dataset is distributed under CC BY 4.0; please cite the original authors
+> when reusing Fire-SmokeDataset.
+
 ## 📁 Dataset Download
 
 The dataset used in this project is available via the following cloud storage links:
