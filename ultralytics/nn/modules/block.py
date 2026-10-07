@@ -7,9 +7,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
 from einops import rearrange
-from timm.models.layers import DropPath, trunc_normal_
+from timm.models.layers import DropPath
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -27,7 +26,7 @@ except ImportError as e:
     ) from e
 
 try:
-    from .csms6s import selective_scan_flop_jit, selective_scan_fn
+    from .csms6s import selective_scan_fn
 except ImportError as e:
     raise ImportError(
         "csms6s is required by the selective scan operators. "
@@ -41,8 +40,6 @@ except ImportError as e:
         "mamba2.ssd_minimal is required by the selective scan operators. "
         "Ensure the mamba2 module is present next to block.py."
     ) from e
-
-from ultralytics.nn.modules.conv import CBAM, DWConv, Conv, GhostConv, autopad
 
 __all__ = (
     "DFL",
@@ -1305,28 +1302,6 @@ class CGLU(nn.Module):
         return x
 
 
-class LayerNorm2d(nn.Module):
-    """Layer normalization over the channel dimension of a 4D NCHW tensor."""
-
-    def __init__(self, normalized_shape, eps=1e-6, elementwise_affine=True):
-        """Initialize the layer normalization.
-
-        Args:
-            normalized_shape: Channel count to normalize over.
-            eps: Small constant added to the variance for numerical stability.
-            elementwise_affine: Whether to learn per-channel scale and bias.
-        """
-        super().__init__()
-        self.norm = nn.LayerNorm(normalized_shape, eps, elementwise_affine)
-
-    def forward(self, x):
-        """Normalize over the channel dimension of an NCHW tensor."""
-        x = rearrange(x, 'b c h w -> b h w c').contiguous()
-        x = self.norm(x)
-        x = rearrange(x, 'b h w c -> b c h w').contiguous()
-        return x
-
-
 class SSBlock(nn.Module):
     """Selective scan block combining a 2D selective scan (SS2D) with a gated convolutional FFN.
 
@@ -1767,7 +1742,15 @@ class Linear2d(nn.Linear):
 
 
 class LayerNorm2d(nn.LayerNorm):
+    """Layer normalization over the channel dimension of a 4D NCHW tensor.
+
+    Permutes the tensor to NHWC so ``nn.LayerNorm`` normalizes the channel axis, then
+    restores NCHW. The behaviour matches the channels-last formulation used by the
+    vision transformer blocks; used wherever ``channel_first`` is set.
+    """
+
     def forward(self, x: torch.Tensor):
+        """Normalize over the channel dimension of an NCHW tensor."""
         x = x.permute(0, 2, 3, 1)
         x = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
         x = x.permute(0, 3, 1, 2)
