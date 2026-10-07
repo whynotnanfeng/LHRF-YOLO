@@ -143,7 +143,8 @@ def test_predict_grey_and_4ch():
 
     source_greyscale = directory / "greyscale.jpg"
     source_rgba = directory / "4ch.png"
-    source_non_utf = directory / "non_UTF_测试文件_tést_image.jpg"
+    # Non-ASCII filename, written with escapes so this file stays ASCII-only.
+    source_non_utf = directory / "non_UTF_\u00e9\u00e8\u00ea_\u4f60\u597d.jpg"
     source_spaces = directory / "image with spaces.jpg"
 
     im.convert("L").save(source_greyscale)  # greyscale

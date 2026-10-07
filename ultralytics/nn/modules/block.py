@@ -1236,12 +1236,16 @@ class DynamicSparseGate(nn.Module):
 
 
 class SWF(nn.Module):
-    """Scale weighted fusion.
+    """Scaling weighted fusion (SWF), the multi-scale fusion module of LHRF-YOLO.
 
-    Concatenates two feature maps and learns a normalised pair of weights ``w`` scaled by a
-    global factor ``v``, so that each branch contributes in proportion to its usefulness instead of
-    being merged at a fixed 1:1 ratio. Input is a list of two tensors; they are weighted and joined
-    along dimension ``dimension``.
+    Concatenates two feature maps and learns a normalised pair of weights ``w`` scaled by a global
+    factor ``v``, so each branch contributes in proportion to its usefulness instead of being merged
+    at a fixed 1:1 ratio. Input is a list of two tensors; they are weighted and joined along
+    ``dimension``.
+
+    Named after "Scaling Weighted Fusion" in "LHRF-YOLO: A Lightweight Model with Hybrid Receptive
+    Field for Forest Fire Detection", Forests 2025, 16, 1095, section 2.2.4.
+    https://doi.org/10.3390/f16071095
     """
 
     def __init__(self, dimension=1):
@@ -1391,7 +1395,8 @@ class SSBlock(nn.Module):
         return x
 
 class RMELAN(nn.Module):
-    """Residual multi-branch efficient layer aggregation network.
+    """Residual multi-branch efficient layer aggregation networks (RMELAN), the hybrid receptive
+    field module of LHRF-YOLO.
 
     Splits the input into a quarter-width embedding and processes it through parallel branches: a
     convolutional branch for local detail and one or more ``SSBlock`` selective scan branches for
@@ -1402,6 +1407,10 @@ class RMELAN(nn.Module):
 
     The selective scan gives a large receptive field at linear complexity, so the module captures
     both the dynamic spread of flames and faint smoke texture without the cost of self-attention.
+
+    Named after "Residual Multi-Branch Efficient Layer Aggregation Networks" in "LHRF-YOLO: A
+    Lightweight Model with Hybrid Receptive Field for Forest Fire Detection", Forests 2025, 16,
+    1095, section 2.2.2. https://doi.org/10.3390/f16071095
     """
 
     def __init__(self, in_channels, out_channels, n=1, e=2, ssm_state=12, ssm_ratio=2, ffn_ratio=4):
@@ -1474,7 +1483,7 @@ class RMELAN(nn.Module):
 
 
 class DEPMD(nn.Module):
-    """Dynamic enhanced patch merge downsampling.
+    """Dynamic enhanced patch merge downsampling (DEPMD), the downsampling module of LHRF-YOLO.
 
     Halves the spatial resolution of an NCHW tensor without discarding information: the input is
     split into four interleaved sub-samples (even/even, odd/even, even/odd, odd/odd rows and
@@ -1483,6 +1492,10 @@ class DEPMD(nn.Module):
     squeeze-and-excitation branch re-weights the output channel-wise and is added back through a
     learnable ``alpha``, so fine smoke texture survives the reduction better than with strided
     convolution or plain patch merging.
+
+    Named after "Dynamic Enhanced Patch Merge Downsampling" in "LHRF-YOLO: A Lightweight Model with
+    Hybrid Receptive Field for Forest Fire Detection", Forests 2025, 16, 1095, section 2.2.3.
+    https://doi.org/10.3390/f16071095
     """
 
     def __init__(self, dim, out_dim):
