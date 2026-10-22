@@ -1,0 +1,12 @@
+# FS-Dataset (forest fire and smoke).
+# Set path to the dataset root, or use an absolute path.
+
+path: ../datasets/FS-Dataset
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+  0: fire
+  1: others
+  2: smoke

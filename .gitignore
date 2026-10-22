@@ -1,0 +1,20 @@
+﻿__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.vscode/
+.pytest_cache/
+
+# training outputs
+runs/
+datasets/
+*.log
+results.csv
+args.yaml
+
+# weights
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
